@@ -1,0 +1,355 @@
+import { withLock, matchLockKey } from '../../lib/lock';
+import {
+  PLAYERS_PER_TEAM,
+  quotaBalls,
+  type MatchState,
+  type PlayingXiInput,
+  type TossInput,
+} from '@howzat/shared';
+import type { Match, Prisma } from '@prisma/client';
+import { prisma } from '../../lib/prisma';
+import { notFound, unprocessable } from '../../lib/errors';
+import { assertTeamEligible } from '../teams/eligibility';
+import { publishMatchEvent } from '../../realtime/bus';
+import { applyDlsRevision } from '../dls/service';
+
+export async function loadMatchOrThrow(matchId: string) {
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: {
+      team1: true,
+      team2: true,
+      tournament: { select: { id: true, organizerId: true, oversPerInnings: true, sport: true } },
+      innings: { orderBy: { number: 'asc' } },
+    },
+  });
+
+  if (!match) throw notFound('Match');
+  return match;
+}
+
+export async function recordToss(matchId: string, input: TossInput) {
+  return withLock(matchLockKey(matchId), async () => {
+    const match = await loadMatchOrThrow(matchId);
+    if (match.tournament.sport !== 'CRICKET')
+      throw unprocessable('WRONG_SPORT', 'Use the football controls for this match');
+
+    if (match.status !== 'SCHEDULED' && match.status !== 'TOSS') {
+      throw unprocessable('MATCH_STARTED', 'The toss can only be set before play begins');
+    }
+
+    if (!match.team1Id || !match.team2Id) {
+      throw unprocessable(
+        'TEAMS_NOT_SET',
+        'This bracket slot has no teams yet — its feeder matches must finish first',
+      );
+    }
+
+    if (input.tossWinnerId !== match.team1Id && input.tossWinnerId !== match.team2Id) {
+      throw unprocessable('NOT_IN_MATCH', 'The toss winner must be one of the two teams');
+    }
+
+    await assertTeamEligible(match.team1Id);
+    await assertTeamEligible(match.team2Id);
+
+    return prisma.match.update({
+      where: { id: matchId },
+      data: {
+        tossWinnerId: input.tossWinnerId,
+        tossDecision: input.decision,
+        status: 'TOSS',
+      },
+      include: { team1: true, team2: true },
+    });
+  });
+}
+
+export async function setPlayingXi(matchId: string, input: PlayingXiInput) {
+  return withLock(matchLockKey(matchId), async () => {
+    const match = await loadMatchOrThrow(matchId);
+    if (match.tournament.sport !== 'CRICKET')
+      throw unprocessable('WRONG_SPORT', 'Use the football controls for this match');
+
+    if (match.status !== 'TOSS' && match.status !== 'SCHEDULED') {
+      throw unprocessable(
+        'MATCH_STARTED',
+        'The playing XI is locked once the first innings has begun',
+      );
+    }
+
+    if (!match.team1Id || !match.team2Id) {
+      throw unprocessable('TEAMS_NOT_SET', 'This match has no teams yet');
+    }
+
+    const expected = new Set([match.team1Id, match.team2Id]);
+    const given = new Set(input.teams.map((team) => team.teamId));
+
+    if (given.size !== 2 || ![...given].every((id) => expected.has(id))) {
+      throw unprocessable('WRONG_TEAMS', 'The XIs must be for the two teams in this match');
+    }
+
+    const playerIds = input.teams.flatMap((team) => team.players.map((player) => player.playerId));
+
+    const players = await prisma.player.findMany({
+      where: { id: { in: playerIds } },
+      select: { id: true, teamId: true, name: true },
+    });
+
+    const byId = new Map(players.map((player) => [player.id, player]));
+
+    for (const team of input.teams) {
+      for (const entry of team.players) {
+        const player = byId.get(entry.playerId);
+
+        if (!player) {
+          throw unprocessable('UNKNOWN_PLAYER', `Player ${entry.playerId} does not exist`);
+        }
+
+        if (player.teamId !== team.teamId) {
+          throw unprocessable(
+            'PLAYER_WRONG_TEAM',
+            `${player.name} is not registered to the team that named them`,
+          );
+        }
+      }
+    }
+
+    const rows: Prisma.MatchPlayerCreateManyInput[] = input.teams.flatMap((team) =>
+      team.players.map((player) => ({
+        matchId,
+        teamId: team.teamId,
+        playerId: player.playerId,
+        battingOrder: player.battingOrder,
+        isCaptain: player.isCaptain,
+        isKeeper: player.isKeeper,
+      })),
+    );
+
+    await prisma.$transaction([
+      prisma.matchPlayer.deleteMany({ where: { matchId } }),
+      prisma.matchPlayer.createMany({ data: rows }),
+    ]);
+
+    return prisma.matchPlayer.findMany({
+      where: { matchId },
+      include: { player: true },
+      orderBy: [{ teamId: 'asc' }, { battingOrder: 'asc' }],
+    });
+  });
+}
+
+function battingFirstTeamId(match: Match): string {
+  const { tossWinnerId, tossDecision, team1Id, team2Id } = match;
+
+  if (!tossWinnerId || !tossDecision || !team1Id || !team2Id) {
+    throw unprocessable('NO_TOSS', 'Record the toss before starting the innings');
+  }
+
+  const tossLoserId = tossWinnerId === team1Id ? team2Id : team1Id;
+
+  return tossDecision === 'BAT' ? tossWinnerId : tossLoserId;
+}
+
+export async function openFirstInnings(matchId: string) {
+  return withLock(matchLockKey(matchId), async () => {
+    const match = await loadMatchOrThrow(matchId);
+    if (match.tournament.sport !== 'CRICKET')
+      throw unprocessable('WRONG_SPORT', 'Use the football controls for this match');
+
+    if (match.status === 'LIVE' || match.innings.length > 0) {
+      throw unprocessable('ALREADY_STARTED', 'This match has already started');
+    }
+
+    if (match.status !== 'TOSS') {
+      throw unprocessable('NO_TOSS', 'Record the toss before starting the match');
+    }
+
+    const xiCount = await prisma.matchPlayer.count({ where: { matchId } });
+
+    if (xiCount !== PLAYERS_PER_TEAM * 2) {
+      throw unprocessable(
+        'XI_NOT_SET',
+        `Both playing XIs must be named — ${xiCount} of ${PLAYERS_PER_TEAM * 2} players selected`,
+      );
+    }
+
+    const battingTeamId = battingFirstTeamId(match);
+    const bowlingTeamId = battingTeamId === match.team1Id ? match.team2Id! : match.team1Id!;
+
+    const [, innings] = await prisma.$transaction([
+      prisma.match.update({ where: { id: matchId }, data: { status: 'LIVE' } }),
+      prisma.innings.create({
+        data: {
+          matchId,
+          number: 1,
+          battingTeamId,
+          bowlingTeamId,
+          oversQuota: match.oversPerInnings,
+        },
+      }),
+      prisma.tournament.update({
+        where: { id: match.tournamentId },
+        data: { status: 'IN_PROGRESS' },
+      }),
+    ]);
+
+    return innings;
+  });
+}
+
+export async function closeInnings(
+  inningsId: string,
+  state: MatchState,
+): Promise<{ matchCompleted: boolean; nextInningsId: string | null }> {
+  const innings = await prisma.innings.findUnique({
+    where: { id: inningsId },
+    include: { match: { include: { team1: true, team2: true } } },
+  });
+
+  if (!innings) throw notFound('Innings');
+  if (innings.status === 'COMPLETED') {
+    return { matchCompleted: innings.match.status === 'COMPLETED', nextInningsId: null };
+  }
+
+  await prisma.innings.update({
+    where: { id: inningsId },
+    data: { status: 'COMPLETED', endReason: state.endReason },
+  });
+
+  if (innings.number === 1) {
+    const next = await prisma.innings.create({
+      data: {
+        matchId: innings.matchId,
+        number: 2,
+        battingTeamId: innings.bowlingTeamId,
+        bowlingTeamId: innings.battingTeamId,
+        // The chase gets whatever the first innings ended up with, to the ball.
+        oversQuota: innings.oversQuota,
+        ballsQuota: innings.ballsQuota,
+        targetRuns: state.runs + 1,
+      },
+    });
+
+    await prisma.match.update({
+      where: { id: innings.matchId },
+      data: { status: 'INNINGS_BREAK' },
+    });
+
+    // Now that there is a first-innings score and a chase to scale, DLS has a
+    // target to set — and it overwrites the plain "one more than they made".
+    if (innings.match.dlsApplied) await applyDlsRevision(innings.matchId);
+
+    return { matchCompleted: false, nextInningsId: next.id };
+  }
+
+  await completeMatch(innings.matchId, state);
+  return { matchCompleted: true, nextInningsId: null };
+}
+
+export async function completeMatch(matchId: string, secondInningsState: MatchState) {
+  return withLock(matchLockKey(matchId), async () => {
+    const match = await prisma.match.findUnique({
+      where: { id: matchId },
+      include: { innings: { orderBy: { number: 'asc' } }, team1: true, team2: true },
+    });
+
+    if (!match) throw notFound('Match');
+
+    const first = match.innings.find((entry) => entry.number === 1);
+    const second = match.innings.find((entry) => entry.number === 2);
+
+    if (!first || !second) throw unprocessable('NO_INNINGS', 'The match has no second innings');
+
+    const target = second.targetRuns ?? 0;
+    const chasingRuns = secondInningsState.runs;
+
+    // Under DLS this is the par score rather than the first innings total, which
+    // is exactly the figure a losing margin should be measured against.
+    const parScore = target - 1;
+
+    const chasingTeam = teamById(match, second.battingTeamId);
+    const defendingTeam = teamById(match, second.bowlingTeamId);
+
+    // A chase that ran its course against a revised target was still decided by
+    // DLS, and the scorecard has to say so — but only if the weather actually
+    // took something. A scorer who armed DLS against a forecast that never
+    // arrived has played an ordinary match, and calling it a DLS result would
+    // also hand net run rate the par-score substitution it must not have here.
+    const stoppages = await prisma.dlsInterruption.count({ where: { matchId } });
+    const byDls = match.dlsApplied && stoppages > 0;
+    const method = byDls ? ' (DLS method)' : '';
+
+    let winnerTeamId: string | null = null;
+    let resultText: string;
+
+    if (chasingRuns >= target) {
+      const wicketsLeft = PLAYERS_PER_TEAM - 1 - secondInningsState.wickets;
+      const ballsLeft = quotaBalls(second) - secondInningsState.legalBalls;
+
+      winnerTeamId = second.battingTeamId;
+      resultText =
+        `${chasingTeam} won by ${wicketsLeft} wicket${wicketsLeft === 1 ? '' : 's'}${method}` +
+        (ballsLeft > 0 ? ` with ${ballsLeft} ball${ballsLeft === 1 ? '' : 's'} to spare` : '');
+    } else if (chasingRuns === parScore) {
+      resultText = `Match tied${method}`;
+    } else {
+      const margin = parScore - chasingRuns;
+      winnerTeamId = second.bowlingTeamId;
+      resultText = `${defendingTeam} won by ${margin} run${margin === 1 ? '' : 's'}${method}`;
+    }
+
+    const updated = await prisma.match.update({
+      where: { id: matchId },
+      data: {
+        status: 'COMPLETED',
+        winnerTeamId,
+        resultText,
+        ...(byDls ? { decidedByDls: true, dlsParScore: parScore } : {}),
+      },
+    });
+
+    await publishMatchEvent('match:completed', {
+      matchId,
+      tournamentId: match.tournamentId,
+      winnerTeamId,
+    });
+
+    return updated;
+  });
+}
+
+export async function abandonMatch(matchId: string, resultText?: string) {
+  return withLock(matchLockKey(matchId), async () => {
+    const match = await loadMatchOrThrow(matchId);
+
+    if (match.status === 'COMPLETED') {
+      throw unprocessable('ALREADY_COMPLETE', 'This match already has a result');
+    }
+
+    const updated = await prisma.match.update({
+      where: { id: matchId },
+      data: {
+        status: 'ABANDONED',
+        resultText: resultText ?? 'Match abandoned — no result',
+        winnerTeamId: null,
+      },
+    });
+
+    await publishMatchEvent('match:completed', {
+      matchId,
+      tournamentId: match.tournamentId,
+      winnerTeamId: null,
+    });
+
+    return updated;
+  });
+}
+
+function teamById(
+  match: { team1: { id: string; name: string } | null; team2: { id: string; name: string } | null },
+  teamId: string,
+): string {
+  if (match.team1?.id === teamId) return match.team1.name;
+  if (match.team2?.id === teamId) return match.team2.name;
+  return 'Unknown team';
+}

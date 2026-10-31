@@ -1,0 +1,370 @@
+import { incrementWindow } from '../../lib/redis';
+import { Router } from 'express';
+import {
+  changePasswordSchema,
+  forgotPasswordSchema,
+  loginSchema,
+  registerSchema,
+  resendVerificationSchema,
+  resetPasswordSchema,
+  updateProfileSchema,
+  usernameAvailabilitySchema,
+  verifyEmailSchema,
+  type AuthSession,
+  type AuthUser,
+} from '@howzat/shared';
+import { prisma } from '../../lib/prisma';
+import { asyncHandler, parseBody, parseQuery } from '../../lib/http';
+import {
+  badRequest,
+  conflict,
+  forbidden,
+  unauthorized,
+  unprocessable,
+  tooManyRequests,
+} from '../../lib/errors';
+import { emailEnabled, isDevelopment } from '../../config/env';
+import { requireAuth } from '../../middleware/auth';
+import { assertOtpRequestAllowed, issueOtp, verifyOtp } from './otp';
+import { sendPasswordResetEmail, sendVerificationEmail } from './mailer';
+import { burnPasswordComparison, hashPassword, verifyPassword } from './passwords';
+import {
+  REFRESH_COOKIE,
+  accessTokenTtlSeconds,
+  clearRefreshCookie,
+  issueRefreshToken,
+  revokeRefreshToken,
+  rotateRefreshToken,
+  setRefreshCookie,
+  signAccessToken,
+} from './tokens';
+
+export const authRouter = Router();
+
+authRouter.post(
+  '/register',
+  asyncHandler(async (req, res) => {
+    const { email, username, name, password } = parseBody(registerSchema, req.body);
+
+    await assertOtpRequestAllowed(email, clientIp(req.ip));
+
+    const [byEmail, byUsername] = await Promise.all([
+      prisma.user.findUnique({ where: { email } }),
+      prisma.user.findUnique({ where: { username }, select: { id: true } }),
+    ]);
+
+    if (byEmail?.emailVerifiedAt) {
+      throw conflict('An account already exists for this email — sign in instead');
+    }
+
+    if (byUsername && byUsername.id !== byEmail?.id) {
+      throw conflict('That username is already taken');
+    }
+
+    const passwordHash = await hashPassword(password);
+
+    if (byEmail) {
+      await prisma.user.update({
+        where: { id: byEmail.id },
+        data: { username, name, passwordHash },
+      });
+    } else {
+      await prisma.user.create({ data: { email, username, name, passwordHash } });
+    }
+
+    const code = await issueOtp(email);
+    await sendVerificationEmail(email, code);
+
+    res.status(202).json({
+      status: 'verification_sent',
+      email,
+      devCode: !emailEnabled && isDevelopment ? code : undefined,
+    });
+  }),
+);
+
+authRouter.post(
+  '/verify-email',
+  asyncHandler(async (req, res) => {
+    const { email, code } = parseBody(verifyEmailSchema, req.body);
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) throw unauthorized('That code is incorrect or has expired');
+
+    await verifyOtp(email, code);
+
+    const verified = user.emailVerifiedAt
+      ? user
+      : await prisma.user.update({
+          where: { id: user.id },
+          data: { emailVerifiedAt: new Date() },
+        });
+
+    const refreshToken = await issueRefreshToken(verified.id);
+    setRefreshCookie(res, refreshToken);
+
+    res.json(sessionFor(verified));
+  }),
+);
+
+authRouter.post(
+  '/resend-verification',
+  asyncHandler(async (req, res) => {
+    const { email } = parseBody(resendVerificationSchema, req.body);
+
+    await assertOtpRequestAllowed(email, clientIp(req.ip));
+
+    const user = await prisma.user.findUnique({ where: { email } });
+
+    if (user && !user.emailVerifiedAt) {
+      const code = await issueOtp(email);
+      await sendVerificationEmail(email, code);
+
+      res.status(202).json({
+        status: 'verification_sent',
+        devCode: !emailEnabled && isDevelopment ? code : undefined,
+      });
+      return;
+    }
+
+    res.status(202).json({ status: 'verification_sent' });
+  }),
+);
+
+authRouter.post(
+  '/login',
+  asyncHandler(async (req, res) => {
+    const { identifier, password } = parseBody(loginSchema, req.body);
+    const attempts = await incrementWindow(`rl:login:${clientIp(req.ip)}:${identifier}`, 900);
+    if (attempts.count > 15)
+      throw tooManyRequests('Too many sign-in attempts. Try again later.', attempts.ttl);
+
+    const user = identifier.includes('@')
+      ? await prisma.user.findUnique({ where: { email: identifier } })
+      : await prisma.user.findUnique({ where: { username: identifier } });
+
+    if (!user) {
+      await burnPasswordComparison();
+      throw unauthorized('Incorrect username or password');
+    }
+
+    const ok = await verifyPassword(password, user.passwordHash);
+    if (!ok) throw unauthorized('Incorrect username or password');
+
+    if (!user.emailVerifiedAt) {
+      throw unprocessable(
+        'EMAIL_UNVERIFIED',
+        'Confirm your email address to finish setting up this account',
+        { email: user.email },
+      );
+    }
+
+    const refreshToken = await issueRefreshToken(user.id);
+    setRefreshCookie(res, refreshToken);
+
+    res.json(sessionFor(user));
+  }),
+);
+
+authRouter.post(
+  '/forgot-password',
+  asyncHandler(async (req, res) => {
+    const { email } = parseBody(forgotPasswordSchema, req.body);
+
+    await assertOtpRequestAllowed(email, clientIp(req.ip));
+
+    const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+
+    let code: string | null = null;
+
+    if (user) {
+      code = await issueOtp(email, 'PASSWORD_RESET');
+      await sendPasswordResetEmail(email, code);
+    }
+
+    res.status(202).json({
+      status: 'reset_sent',
+      devCode: code && !emailEnabled && isDevelopment ? code : undefined,
+    });
+  }),
+);
+
+authRouter.post(
+  '/reset-password',
+  asyncHandler(async (req, res) => {
+    const { email, code, newPassword } = parseBody(resetPasswordSchema, req.body);
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) throw badRequest('That code is incorrect or has expired');
+
+    await verifyOtp(email, code, 'PASSWORD_RESET');
+
+    const passwordHash = await hashPassword(newPassword);
+
+    const [updated] = await prisma.$transaction([
+      prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash,
+          emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+        },
+      }),
+      prisma.refreshToken.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    const refreshToken = await issueRefreshToken(updated.id);
+    setRefreshCookie(res, refreshToken);
+
+    res.json(sessionFor(updated));
+  }),
+);
+
+authRouter.post(
+  '/refresh',
+  asyncHandler(async (req, res) => {
+    const presented = req.cookies?.[REFRESH_COOKIE];
+    if (typeof presented !== 'string' || !presented) {
+      throw unauthorized('No active session');
+    }
+
+    const { userId, token } = await rotateRefreshToken(presented);
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw unauthorized('No active session');
+
+    setRefreshCookie(res, token);
+    res.json(sessionFor(user));
+  }),
+);
+
+authRouter.post(
+  '/logout',
+  asyncHandler(async (req, res) => {
+    const presented = req.cookies?.[REFRESH_COOKIE];
+    if (typeof presented === 'string' && presented) {
+      await revokeRefreshToken(presented);
+    }
+    clearRefreshCookie(res);
+    res.status(204).end();
+  }),
+);
+
+authRouter.get(
+  '/username-available',
+  asyncHandler(async (req, res) => {
+    const { username } = parseQuery(usernameAvailabilitySchema, req.query);
+
+    const taken = await prisma.user.findUnique({ where: { username }, select: { id: true } });
+
+    res.json({ username, available: !taken });
+  }),
+);
+
+authRouter.get(
+  '/me',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
+    if (!user) throw unauthorized();
+    res.json(toAuthUser(user));
+  }),
+);
+
+authRouter.patch(
+  '/me',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const input = parseBody(updateProfileSchema, req.body);
+
+    if (input.username) {
+      const taken = await prisma.user.findFirst({
+        where: { username: input.username, id: { not: req.user!.id } },
+        select: { id: true },
+      });
+      if (taken) throw conflict('That username is already taken');
+    }
+
+    const user = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id: req.user!.id },
+        data: {
+          ...(input.name ? { name: input.name } : {}),
+          ...(input.username ? { username: input.username } : {}),
+        },
+      });
+
+      if (input.username) {
+        await tx.player.updateMany({
+          where: { userId: user.id },
+          data: { username: user.username },
+        });
+      }
+
+      return user;
+    });
+
+    res.json(toAuthUser(user));
+  }),
+);
+
+authRouter.post(
+  '/change-password',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { currentPassword, newPassword } = parseBody(changePasswordSchema, req.body);
+
+    const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
+    if (!user) throw unauthorized();
+
+    const ok = await verifyPassword(currentPassword, user.passwordHash);
+    if (!ok) throw forbidden('That is not your current password');
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash: await hashPassword(newPassword) },
+      }),
+      prisma.refreshToken.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    clearRefreshCookie(res);
+    res.status(204).end();
+  }),
+);
+
+type UserRecord = {
+  id: string;
+  email: string;
+  username: string;
+  name: string;
+  createdAt: Date;
+};
+
+function toAuthUser(user: UserRecord): AuthUser {
+  return {
+    id: user.id,
+    email: user.email,
+    username: user.username,
+    name: user.name,
+    createdAt: user.createdAt.toISOString(),
+  };
+}
+
+function sessionFor(user: UserRecord): AuthSession {
+  return {
+    user: toAuthUser(user),
+    accessToken: signAccessToken({ sub: user.id, email: user.email }),
+    expiresIn: accessTokenTtlSeconds,
+  };
+}
+
+function clientIp(ip: string | undefined): string {
+  if (!ip) return 'unknown';
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}

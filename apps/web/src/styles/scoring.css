@@ -1,0 +1,549 @@
+.sketch {
+  filter: none;
+}
+
+.eyebrow[data-tone='live'] {
+  color: var(--live);
+}
+
+.eyebrow[data-tone='accent'] {
+  color: var(--accent);
+}
+
+.eyebrow[data-tone='success'] {
+  color: var(--success);
+}
+
+.eyebrow[data-tone='warning'] {
+  color: var(--warning);
+}
+
+.board {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.board-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+
+.board-stat dt {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.board-stat dd {
+  font-family: var(--font-serif);
+  font-size: 1.75rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ball {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.ball[data-kind='dot'] {
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+  border-color: var(--line);
+}
+
+.ball[data-kind='four'] {
+  border-color: var(--text-primary);
+  border-width: 1.5px;
+  color: var(--text-primary);
+}
+
+.ball[data-kind='six'] {
+  border-color: var(--text-primary);
+  background: var(--text-primary);
+  color: var(--surface);
+}
+
+.ball[data-kind='wicket'] {
+  border-color: var(--wicket);
+  background: transparent;
+  color: var(--wicket);
+  border-width: 1.5px;
+}
+
+.ball[data-kind='extra'] {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.8em;
+}
+
+@keyframes chip-land {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.6);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(0) scale(1.12);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+.chip-land {
+  display: inline-flex;
+  animation: chip-land 380ms var(--ease) both;
+}
+
+.pad {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: var(--surface-raised);
+}
+
+.pad-key {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums lining-nums;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform 110ms var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.pad-key:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+}
+
+.pad-key:active:not(:disabled) {
+  transform: scale(0.93);
+  transition-duration: 60ms;
+}
+
+.pad-key:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pad-key[data-tone='four'],
+.pad-key[data-tone='six'] {
+  border-color: var(--text-primary);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-family: var(--font-serif);
+  font-size: 1.5em;
+  font-weight: 400;
+}
+
+.pad-key[data-tone='six'] {
+  background: var(--text-primary);
+  color: var(--surface);
+}
+
+.pad-key[data-tone='four']:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--text-primary);
+}
+
+.pad-key[data-tone='six']:hover:not(:disabled) {
+  background: var(--text-secondary);
+  border-color: var(--text-secondary);
+}
+
+.pad-key[data-tone='wicket'] {
+  border-color: var(--wicket);
+  background: transparent;
+  color: var(--wicket);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.pad-key[data-tone='wicket']:hover:not(:disabled) {
+  background: var(--live-soft);
+  border-color: var(--wicket);
+}
+
+.pad-key[data-tone='quiet'] {
+  background: transparent;
+}
+
+.pad-key[data-armed='true'] {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.key-legend {
+  position: absolute;
+  inset-block-start: 0.25rem;
+  inset-inline-end: 0.375rem;
+  font-size: 0.5625rem;
+  font-weight: 600;
+  opacity: 0.45;
+}
+
+@keyframes key-ripple {
+  from {
+    opacity: 0.45;
+    transform: scale(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+.key-ripple {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  width: 100%;
+  aspect-ratio: 1;
+  margin-inline-start: -50%;
+  margin-block-start: -50%;
+  border-radius: 50%;
+  background: currentColor;
+  pointer-events: none;
+  animation: key-ripple 520ms var(--ease) forwards;
+}
+
+.pad-seg {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+}
+
+.pad-seg .pad-key {
+  border-color: transparent;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-weight: 500;
+}
+
+.pad-seg .pad-key:hover:not(:disabled) {
+  background: var(--surface-raised);
+}
+
+.pad-seg .pad-key[data-armed='true'] {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+@keyframes rpo-grow {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+.rpo-bar {
+  transform-origin: bottom;
+  animation: rpo-grow 520ms var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 25ms);
+}
+
+.rpo-col {
+  position: relative;
+}
+
+.rpo-tip {
+  position: absolute;
+  inset-block-end: calc(100% + 4px);
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rpo-col:hover .rpo-tip {
+  opacity: 1;
+}
+
+.moment {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.moment::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklab, var(--surface) 92%, transparent);
+  opacity: 0;
+  animation: moment-wash 2s var(--ease) both;
+}
+
+.moment[data-kind='wicket'] .moment-plate {
+  animation:
+    moment-plate 2s var(--ease) both,
+    moment-shake 420ms cubic-bezier(0.36, 0.07, 0.19, 0.97) 180ms both;
+}
+
+@keyframes moment-shake {
+  10%,
+  90% {
+    translate: -2px 0;
+  }
+  20%,
+  80% {
+    translate: 4px 0;
+  }
+  30%,
+  50%,
+  70% {
+    translate: -6px 0;
+  }
+  40%,
+  60% {
+    translate: 6px 0;
+  }
+}
+
+@keyframes moment-wash {
+  0% {
+    opacity: 0;
+  }
+  12%,
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.moment-ring {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  width: 16rem;
+  aspect-ratio: 1;
+  margin: -8rem 0 0 -8rem;
+  border-radius: 50%;
+  border: 2px solid var(--moment-ink);
+  opacity: 0;
+  animation: moment-ring 1.4s var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 140ms + 80ms);
+}
+
+@keyframes moment-ring {
+  0% {
+    opacity: 0.6;
+    transform: scale(0.3);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(3);
+  }
+}
+
+.moment-spark {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  width: 6px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--moment-ink);
+  opacity: 0;
+  transform: rotate(var(--a)) translateY(0);
+  animation: moment-spark 1.2s cubic-bezier(0.12, 0.8, 0.3, 1) both;
+  animation-delay: calc(120ms + var(--d, 0ms));
+}
+
+.moment-spark:nth-child(4n) {
+  border-radius: 50%;
+  width: 8px;
+  height: 8px;
+}
+
+@keyframes moment-spark {
+  0% {
+    opacity: 1;
+    transform: rotate(var(--a)) translateY(-10px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(var(--a)) translateY(var(--r, -40vmin)) scale(0.4);
+  }
+}
+
+.moment-plate {
+  position: relative;
+  animation: moment-plate 2s var(--ease) both;
+}
+
+@keyframes moment-plate {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  14% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+  22%,
+  76% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+.ink-draw {
+  stroke-dasharray: var(--len, 400);
+  stroke-dashoffset: var(--len, 400);
+  animation: ink-draw 560ms var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+
+@keyframes ink-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.ink-pop {
+  animation: ink-pop 420ms var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes ink-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.moment-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.375rem 1.25rem;
+  border-radius: var(--radius-md);
+  background: var(--moment-ink);
+  color: var(--moment-on, #fff);
+  font-family: var(--font-serif);
+  font-size: clamp(3rem, 12vw, 6rem);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1;
+}
+
+.moment-badge > span {
+  display: inline-block;
+  animation: moment-letter 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(120ms + var(--i, 0) * 45ms);
+}
+
+@keyframes moment-letter {
+  0% {
+    opacity: 0;
+    transform: translateY(0.35em) scale(0.7);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.roll {
+  display: inline-flex;
+}
+
+.roll-col {
+  display: inline-block;
+  height: 1em;
+  overflow: hidden;
+  line-height: 1;
+}
+
+.roll-strip {
+  display: flex;
+  flex-direction: column;
+  transform: translateY(calc(var(--n, 0) * -1em));
+  transition: transform 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.roll-strip > span {
+  height: 1em;
+  line-height: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .moment {
+    display: none;
+  }
+
+  .chip-land,
+  .rpo-bar,
+  .ink-draw,
+  .ink-pop,
+  .key-ripple,
+  .moment-badge > span {
+    animation: none;
+  }
+
+  .ink-draw {
+    stroke-dashoffset: 0;
+  }
+
+  .roll-strip {
+    transition: none;
+  }
+}

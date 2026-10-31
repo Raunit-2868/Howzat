@@ -1,0 +1,32 @@
+node_modules/
+.vercel
+dist/
+dist-types/
+build/
+.turbo/
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+
+.DS_Store
+Thumbs.db
+
+# Prisma
+apps/api/prisma/migrations/dev.db*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+logs/
+*.log
+npm-debug.log*
+
+# Added by `vercel link`. .env and .env.local are already covered above; the
+# blanket rule is kept for stray .env.production etc., with the committed
+# template exempted.
+.env*
+!.env.example

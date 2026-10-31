@@ -1,0 +1,189 @@
+import { withLock } from '../../lib/lock';
+import {
+  MIN_TEAMS_FOR_PLAYOFFS,
+  PLAYOFF_BRACKET,
+  generateRoundRobin,
+  type FixturePreviewDto,
+  type MatchTeamRef,
+} from '@howzat/shared';
+import type { Prisma, Team, Tournament } from '@prisma/client';
+import { prisma } from '../../lib/prisma';
+import { unprocessable } from '../../lib/errors';
+import { generateSlugs } from '../../lib/slug';
+import { assertTournamentTeamsEligible } from '../teams/eligibility';
+
+export function toTeamRef(team: Team): MatchTeamRef {
+  return {
+    id: team.id,
+    name: team.name,
+    shortName: team.shortName,
+    primaryColor: team.primaryColor,
+  };
+}
+
+async function assertReadyForFixtures(tournament: Tournament): Promise<Team[]> {
+  const teams = await prisma.team.findMany({
+    where: { tournamentId: tournament.id },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  if (teams.length !== tournament.teamsCount) {
+    throw unprocessable(
+      'TEAM_COUNT_MISMATCH',
+      `This tournament is set up for ${tournament.teamsCount} teams but ${teams.length} are registered`,
+      { registered: teams.length, expected: tournament.teamsCount },
+    );
+  }
+
+  if (teams.length < 2) {
+    throw unprocessable('TOO_FEW_TEAMS', 'At least two teams are needed to make a fixture');
+  }
+
+  if (tournament.format === 'LEAGUE_PLAYOFFS' && teams.length < MIN_TEAMS_FOR_PLAYOFFS) {
+    throw unprocessable(
+      'TOO_FEW_FOR_PLAYOFFS',
+      `Playoffs need at least ${MIN_TEAMS_FOR_PLAYOFFS} teams`,
+    );
+  }
+
+  await assertTournamentTeamsEligible(tournament.id);
+
+  return teams;
+}
+
+export async function previewFixtures(tournament: Tournament): Promise<FixturePreviewDto> {
+  if (tournament.format === 'KNOCKOUT')
+    throw unprocessable('UNSUPPORTED_FORMAT', 'Choose League or League with playoffs');
+  const teams = await assertReadyForFixtures(tournament);
+  const byId = new Map(teams.map((team) => [team.id, team]));
+
+  const rounds = generateRoundRobin(
+    teams.map((team) => team.id),
+    { double: tournament.doubleRoundRobin },
+  );
+
+  const leagueRounds = rounds.map((round) => ({
+    round: round.round,
+    matches: round.matches.map((match) => ({
+      home: toTeamRef(byId.get(match.homeTeamId)!),
+      away: toTeamRef(byId.get(match.awayTeamId)!),
+    })),
+  }));
+
+  const playoffs =
+    tournament.format === 'LEAGUE_PLAYOFFS'
+      ? PLAYOFF_BRACKET.map((slot) => ({
+          stage: slot.stage,
+          label: slot.label,
+          description: describeSlot(slot),
+        }))
+      : [];
+
+  return {
+    rounds: leagueRounds,
+    playoffs,
+    totalMatches:
+      leagueRounds.reduce((sum, round) => sum + round.matches.length, 0) + playoffs.length,
+  };
+}
+
+function describeSlot(slot: (typeof PLAYOFF_BRACKET)[number]): string {
+  const describe = (source: (typeof slot)['home']) => {
+    switch (source.kind) {
+      case 'SEED':
+        return `#${source.position} in the league`;
+      case 'WINNER':
+        return `Winner of ${source.stage}`;
+      case 'LOSER':
+        return `Loser of ${source.stage}`;
+    }
+  };
+
+  return `${describe(slot.home)} v ${describe(slot.away)}`;
+}
+
+export async function generateFixtures(
+  tournament: Tournament,
+  options: { regenerate: boolean },
+): Promise<number> {
+  return withLock(`lock:tournament:${tournament.id}`, async () => {
+    tournament = await prisma.tournament.findUniqueOrThrow({ where: { id: tournament.id } });
+    if (tournament.format === 'KNOCKOUT')
+      throw unprocessable('UNSUPPORTED_FORMAT', 'Choose League or League with playoffs');
+    const teams = await assertReadyForFixtures(tournament);
+
+    const existing = await prisma.match.findMany({
+      where: { tournamentId: tournament.id },
+      select: { id: true, status: true },
+    });
+
+    if (existing.length > 0) {
+      if (!options.regenerate) {
+        throw unprocessable(
+          'FIXTURES_EXIST',
+          'Fixtures already exist. Pass regenerate to replace them.',
+          { existing: existing.length },
+        );
+      }
+
+      const started = existing.filter((match) => match.status !== 'SCHEDULED');
+
+      if (started.length > 0) {
+        throw unprocessable(
+          'MATCHES_STARTED',
+          `${started.length} match(es) have already started — fixtures can no longer be regenerated`,
+          { started: started.length },
+        );
+      }
+    }
+
+    const rounds = generateRoundRobin(
+      teams.map((team) => team.id),
+      { double: tournament.doubleRoundRobin },
+    );
+
+    const leagueMatches = rounds.flatMap((round) =>
+      round.matches.map((match) => ({
+        round: round.round,
+        stage: 'LEAGUE' as const,
+        team1Id: match.homeTeamId,
+        team2Id: match.awayTeamId,
+      })),
+    );
+
+    const playoffRound = rounds.length + 1;
+    const playoffMatches =
+      tournament.format === 'LEAGUE_PLAYOFFS'
+        ? PLAYOFF_BRACKET.map((slot) => ({
+            round: playoffRound,
+            stage: slot.stage,
+            team1Id: null,
+            team2Id: null,
+          }))
+        : [];
+
+    const all = [...leagueMatches, ...playoffMatches];
+    const slugs = generateSlugs(all.length);
+
+    const data: Prisma.MatchCreateManyInput[] = all.map((match, index) => ({
+      tournamentId: tournament.id,
+      round: match.round,
+      stage: match.stage,
+      team1Id: match.team1Id,
+      team2Id: match.team2Id,
+      oversPerInnings: tournament.oversPerInnings,
+      publicSlug: slugs[index]!,
+    }));
+
+    await prisma.$transaction([
+      prisma.match.deleteMany({ where: { tournamentId: tournament.id } }),
+      prisma.match.createMany({ data }),
+      prisma.tournament.update({
+        where: { id: tournament.id },
+        data: { status: 'FIXTURES_GENERATED' },
+      }),
+    ]);
+
+    return data.length;
+  });
+}

@@ -1,0 +1,790 @@
+import { InningsInsight } from '@/components/ui/Matchday';
+import { useEffect, useRef, useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import type { BallSummary, FallOfWicket, MatchSnapshot } from '@howzat/shared';
+import { apiFetch } from '@/lib/api';
+import { Skeleton } from '@/components/ui/Feedback';
+import { EmptyState } from '@/components/ui/Card';
+import { SketchDefs } from '@/components/ui/Sketch';
+import { TeamMark } from '@/components/ui/Pill';
+import { ShareLink } from '@/components/ui/ShareLink';
+import { PdfButton } from '@/components/ui/PdfButton';
+import { Tabs } from '@/components/ui/Tabs';
+import { Table, Td, Th } from '@/components/ui/Table';
+import { Wordmark } from '@/components/Wordmark';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { EyeIcon, StumpsIcon, TrendIcon, TrophyIcon } from '@/components/ui/Icons';
+import {
+  BallChip,
+  CreaseCard,
+  LeaderRow,
+  OverStrip,
+  Panel,
+  RunsPerOver,
+  Scoreboard,
+  StatLine,
+} from '@/components/ui/Score';
+import { cn } from '@/lib/cn';
+import { MomentOverlay, useMoment } from './Moment';
+import { useLiveMatch, type ConnectionState } from './useLiveMatch';
+
+type View = 'live' | 'scorecard' | 'commentary';
+
+const VIEWS = [
+  { value: 'live' as const, label: 'Live' },
+  { value: 'scorecard' as const, label: 'Scorecard' },
+  { value: 'commentary' as const, label: 'Ball by ball' },
+];
+
+export function LiveMatchPage() {
+  const { slug = '' } = useParams();
+  const [searchParams] = useSearchParams();
+  const { snapshot, connection, viewers, error, isLoading, notStarted } = useLiveMatch(slug);
+  const requested = searchParams.get('view');
+  const [view, setView] = useState<View>(
+    VIEWS.some((item) => item.value === requested) ? (requested as View) : 'live',
+  );
+  const condensed = useCondensedHeader();
+  const moment = useMoment(snapshot?.lastEventSeq ?? 0, snapshot?.recentBalls ?? EMPTY_BALLS);
+
+  const matchLabel = snapshot ? `${snapshot.batting.short} v ${snapshot.bowling.short}` : undefined;
+
+  useEffect(() => {
+    if (!snapshot) return;
+    document.title = `${matchLabel} · ${snapshot.batting.runs}/${snapshot.batting.wickets} · Howzat`;
+  }, [matchLabel, snapshot]);
+
+  return (
+    <div className="flex min-h-dvh flex-col">
+      <MomentOverlay moment={moment} />
+      <SketchDefs />
+
+      <header className="app-topbar border-b border-line">
+        <div className="mx-auto flex h-14 w-full max-w-[64rem] items-center gap-4 px-4 sm:px-6">
+          <Link to="/" className="shrink-0 transition-opacity hover:opacity-70">
+            <Wordmark size="sm" />
+          </Link>
+
+          {snapshot ? (
+            <div
+              aria-hidden={!condensed}
+              data-shown={condensed}
+              className="live-condensed hidden min-w-0 items-center gap-3 sm:flex"
+            >
+              <span aria-hidden className="h-5 w-px bg-line" />
+              <TeamMark
+                shortName={snapshot.batting.short}
+                color={snapshot.batting.color}
+                size="sm"
+              />
+              <p className="score-figure text-lg text-primary">
+                {snapshot.batting.runs}-{snapshot.batting.wickets}
+                <span className="tabular ml-2 text-[0.8125rem] font-medium text-muted">
+                  ({snapshot.batting.overs})
+                </span>
+              </p>
+            </div>
+          ) : null}
+
+          <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
+            {viewers > 0 ? (
+              <span
+                title={`${viewers} watching now`}
+                className="flex items-center gap-1.5 text-xs text-muted"
+              >
+                <EyeIcon />
+                <span key={viewers} className="figure-in tabular text-secondary">
+                  {viewers.toLocaleString()}
+                </span>
+              </span>
+            ) : null}
+            <ConnectionBadge state={connection} />
+            {snapshot ? (
+              <ShareLink slug={slug} variant="quiet" matchLabel={matchLabel} label="Share" />
+            ) : null}
+            <ThemeToggle />
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto w-full max-w-[64rem] flex-1 px-4 py-5 sm:px-6 sm:py-8">
+        {isLoading ? (
+          <div className="flex flex-col gap-6">
+            <Skeleton className="h-72" />
+            <Skeleton className="h-40" />
+          </div>
+        ) : error && !snapshot ? (
+          <EmptyState scene="scorebook" title="This match could not be loaded" description={error} />
+        ) : notStarted ? (
+          <NotStarted />
+        ) : snapshot ? (
+          <div className="flex flex-col gap-4">
+            <header className="reveal grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 py-2 sm:gap-6 sm:py-4">
+              <div className="flex min-w-0 flex-col items-center gap-3 text-center sm:flex-row sm:text-left">
+                <TeamMark shortName={snapshot.batting.short} color={snapshot.batting.color} size="lg" />
+                <h1 className="serif line-clamp-2 text-[clamp(1.375rem,3.6vw,2.75rem)]">{snapshot.batting.name}</h1>
+              </div>
+              <span
+                aria-hidden
+                className="grid size-10 place-items-center rounded-full border border-line-strong bg-surface font-serif text-[1.25rem] leading-none text-secondary italic sm:size-12"
+              >
+                v
+              </span>
+              <div className="flex min-w-0 flex-col items-center gap-3 text-center sm:flex-row-reverse sm:text-right">
+                <TeamMark shortName={snapshot.bowling.short} color={snapshot.bowling.color} size="lg" />
+                <p className="serif line-clamp-2 text-[clamp(1.375rem,3.6vw,2.75rem)]">{snapshot.bowling.name}</p>
+              </div>
+            </header>
+            <Board snapshot={snapshot} slug={slug} />
+            <InningsInsight
+              balls={snapshot.batting.balls}
+              quota={
+                snapshot.batting.quotaOvers
+                  ? Number(snapshot.batting.quotaOvers.split('.')[0]) * 6 +
+                    Number(snapshot.batting.quotaOvers.split('.')[1] ?? 0)
+                  : (snapshot.batting.oversQuota ?? 20) * 6
+              }
+              wickets={snapshot.batting.wickets}
+              runs={snapshot.batting.runs}
+              target={snapshot.target}
+            />
+
+            <Tabs items={VIEWS} value={view} onChange={setView} />
+
+            {view === 'live' ? (
+              <LiveView snapshot={snapshot} />
+            ) : view === 'scorecard' ? (
+              <ScorecardView slug={slug} />
+            ) : (
+              <CommentaryView snapshot={snapshot} />
+            )}
+          </div>
+        ) : null}
+      </main>
+
+      <footer className="border-t border-line">
+        <div className="mx-auto flex h-12 w-full max-w-[64rem] items-center justify-between gap-3 px-4 text-xs text-muted sm:px-6">
+          <span>Scored on Howzat</span>
+          <Link to="/" className="hover:text-primary">
+            Run a tournament
+          </Link>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+const EMPTY_BALLS: BallSummary[] = [];
+
+function NotStarted() {
+  return (
+    <EmptyState
+      scene="stumps"
+      title="Not started yet"
+      description="Keep this page open. The score updates live from the very first ball."
+    />
+  );
+}
+
+function Board({ snapshot, slug }: { snapshot: MatchSnapshot; slug: string }) {
+  const { batting, bowling, required, target } = snapshot;
+  const quota = batting.quotaOvers ?? (batting.oversQuota ? String(batting.oversQuota) : null);
+  const finished = Boolean(snapshot.resultText);
+
+  return (
+    <Scoreboard
+      team={{ name: batting.name, shortName: batting.short, primaryColor: batting.color }}
+      eyebrow={`Innings ${snapshot.inningsNumber} · v ${bowling.short}`}
+      status={
+        finished ? (
+          <span data-tone="success" className="eyebrow">
+            Result
+          </span>
+        ) : (
+          <span data-tone="live" className="eyebrow flex items-center gap-2">
+            <span aria-hidden className="live-dot" />
+            Live
+          </span>
+        )
+      }
+      runs={batting.runs}
+      wickets={batting.wickets}
+      overs={batting.overs}
+      quota={quota}
+      stats={[
+        { label: 'CRR', value: batting.runRate.toFixed(2) },
+        ...(required ? [{ label: 'RRR', value: required.rrr.toFixed(2) }] : []),
+      ]}
+    >
+      {snapshot.resultText ? (
+        <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-3 px-4 py-3 sm:px-6">
+          <p className="flex min-w-0 items-center gap-2 text-[0.8125rem] font-semibold">
+            <TrophyIcon className="size-4 shrink-0 text-accent" />
+            {snapshot.resultText}
+          </p>
+          <PdfButton
+            size="sm"
+            variant="secondary"
+            build={() => import('@/lib/pdf').then((pdf) => pdf.buildCricketMatchPdf(slug))}
+          />
+        </div>
+      ) : required && target !== null ? (
+        <div className="px-4 py-3 sm:px-6">
+          <p className="text-sm text-secondary">
+            <span className="font-semibold text-primary">{batting.short}</span> need{' '}
+            <span className="font-bold text-accent">{required.runs}</span> runs from{' '}
+            <span className="font-bold text-primary">{required.balls}</span>{' '}
+            {required.balls === 1 ? 'ball' : 'balls'}
+          </p>
+
+          <div className="chase-track mt-2.5">
+            <span
+              className="chase-fill"
+              style={{ width: `${Math.min(100, (batting.runs / Math.max(1, target)) * 100)}%` }}
+            />
+            <span
+              aria-hidden
+              className="chase-marker"
+              style={{
+                left: `${
+                  batting.balls + required.balls > 0
+                    ? (batting.balls / (batting.balls + required.balls)) * 100
+                    : 0
+                }%`,
+              }}
+            />
+          </div>
+
+          <div className="tabular mt-2 flex justify-between text-[0.6875rem] text-muted">
+            <span>
+              {batting.runs} of {target}
+            </span>
+            <span>{required.balls} balls left</span>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-line px-4 py-3 sm:px-6">
+        <p className="eyebrow">This over</p>
+        <OverStrip
+          size="sm"
+          balls={snapshot.thisOver.map((ball, index) => ({
+            key: `${index}-${ball}`,
+            display: ball,
+          }))}
+          emptyLabel="New over"
+        />
+      </div>
+    </Scoreboard>
+  );
+}
+
+function LiveView({ snapshot }: { snapshot: MatchSnapshot }) {
+  const window = recentWindow(snapshot.recentBalls);
+  const partnership = currentPartnership(snapshot);
+  const { extras } = snapshot;
+  const lastWicket = snapshot.fallOfWickets[snapshot.fallOfWickets.length - 1];
+
+  return (
+    <div className="flex flex-col gap-4">
+      <CreaseCard
+        batters={snapshot.batsmen.map((batsman) => ({
+          id: batsman.playerId,
+          name: batsman.name,
+          runs: batsman.runs,
+          balls: batsman.balls,
+          fours: batsman.fours,
+          sixes: batsman.sixes,
+          onStrike: batsman.onStrike,
+        }))}
+        bowler={
+          snapshot.bowler
+            ? {
+                name: snapshot.bowler.name,
+                overs: snapshot.bowler.overs,
+                maidens: snapshot.bowler.maidens,
+                runs: snapshot.bowler.runs,
+                wickets: snapshot.bowler.wickets,
+                econ: snapshot.bowler.econ,
+              }
+            : null
+        }
+      />
+
+      <StatLine
+        items={[
+          { label: 'Partnership', value: `${partnership.runs} (${partnership.balls})` },
+          {
+            label: 'Extras',
+            value: `${extras.total} (w ${extras.wides}, nb ${extras.noBalls}, b ${extras.byes}, lb ${extras.legByes})`,
+          },
+          {
+            label: 'Last wicket',
+            value: lastWicket
+              ? `${lastWicket.name} at ${lastWicket.teamRuns}-${lastWicket.wicket}`
+              : 'None',
+          },
+        ]}
+        note={`Last ${window.balls} balls: ${window.runs} runs, ${window.fours} fours, ${window.sixes} sixes`}
+      />
+
+      <Panel
+        title="Momentum"
+        icon={<TrendIcon />}
+        meta={<span className="text-xs text-muted">per over</span>}
+        bodyClassName="flex flex-col gap-4"
+      >
+        <RunsPerOver balls={snapshot.recentBalls} />
+
+        <div className="flex flex-col gap-2 border-t border-line pt-3">
+          <LeaderRow
+            label={`Last ${window.balls} balls`}
+            value={`${window.runs} runs · ${window.wickets}w`}
+            emphasis
+          />
+          <LeaderRow
+            label="Dot balls"
+            value={window.balls > 0 ? `${Math.round((window.dots / window.balls) * 100)}%` : '—'}
+          />
+        </div>
+      </Panel>
+
+      {snapshot.fallOfWickets.length > 0 ? (
+        <Panel title="Fall of wickets" icon={<StumpsIcon />} bodyClassName="flex flex-col gap-2.5">
+          {snapshot.fallOfWickets
+            .slice()
+            .reverse()
+            .map((wicket) => (
+              <LeaderRow
+                key={wicket.wicket}
+                label={`${wicket.wicket}. ${wicket.name}`}
+                value={`${wicket.teamRuns} (${wicket.overs})`}
+              />
+            ))}
+        </Panel>
+      ) : null}
+    </div>
+  );
+}
+
+function oversToBalls(overs: string): number {
+  const [whole = '0', part = '0'] = overs.split('.');
+  return Number(whole) * 6 + Number(part);
+}
+
+function currentPartnership(snapshot: MatchSnapshot): { runs: number; balls: number } {
+  const last: FallOfWicket | undefined = snapshot.fallOfWickets[snapshot.fallOfWickets.length - 1];
+
+  return {
+    runs: snapshot.batting.runs - (last?.teamRuns ?? 0),
+    balls: snapshot.batting.balls - (last ? oversToBalls(last.overs) : 0),
+  };
+}
+
+interface BallWindow {
+  balls: number;
+  runs: number;
+  dots: number;
+  fours: number;
+  sixes: number;
+  wickets: number;
+}
+
+function recentWindow(recentBalls: BallSummary[]): BallWindow {
+  return recentBalls.reduce<BallWindow>(
+    (totals, ball) => ({
+      balls: totals.balls + (ball.isLegalDelivery ? 1 : 0),
+      runs: totals.runs + ball.runs,
+      dots: totals.dots + (ball.isLegalDelivery && ball.runs === 0 ? 1 : 0),
+      fours: totals.fours + (!ball.extraType && ball.runs === 4 ? 1 : 0),
+      sixes: totals.sixes + (!ball.extraType && ball.runs === 6 ? 1 : 0),
+      wickets: totals.wickets + (ball.isWicket ? 1 : 0),
+    }),
+    { balls: 0, runs: 0, dots: 0, fours: 0, sixes: 0, wickets: 0 },
+  );
+}
+
+interface ScorecardResponse {
+  matchId: string;
+  innings: Array<{
+    number: number;
+    battingTeam: { id: string; name: string; shortName: string; primaryColor: string };
+    bowlingTeam: { id: string; name: string; shortName: string; primaryColor: string };
+    runs: number;
+    wickets: number;
+    overs: string;
+    extras: { wides: number; noBalls: number; byes: number; legByes: number; total: number };
+    batting: Array<{
+      playerId: string;
+      name: string;
+      runs: number;
+      balls: number;
+      fours: number;
+      sixes: number;
+      isOut: boolean;
+      dismissal: string;
+    }>;
+    bowling: Array<{
+      playerId: string;
+      name: string;
+      overs: string;
+      maidens: number;
+      runs: number;
+      wickets: number;
+      figures: string;
+    }>;
+    fallOfWickets: Array<{ wicket: number; name: string; teamRuns: number; overs: string }>;
+  }>;
+}
+
+function ScorecardView({ slug }: { slug: string }) {
+  const { data, isPending, error } = useQuery({
+    queryKey: ['public', 'scorecard', slug],
+    queryFn: () => apiFetch<ScorecardResponse>(`/public/matches/${slug}/scorecard`),
+    staleTime: 10_000,
+  });
+
+  if (isPending) return <Skeleton className="h-96" />;
+  if (error) {
+    return (
+      <p role="alert" className="text-sm text-alert">
+        Scorecard unavailable.
+      </p>
+    );
+  }
+  if (!data || data.innings.length === 0) {
+    return <p className="text-sm text-muted">No innings yet</p>;
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {data.innings.map((innings) => {
+        const balls = oversToBalls(innings.overs);
+        const rate = balls > 0 ? ((innings.runs * 6) / balls).toFixed(2) : '0.00';
+
+        return (
+          <section
+            key={innings.number}
+            className="overflow-hidden rounded-[var(--radius-lg)] border border-line bg-raised"
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-line px-4 py-2.5">
+              <div className="flex min-w-0 items-center gap-3">
+                <TeamMark
+                  shortName={innings.battingTeam.shortName}
+                  color={innings.battingTeam.primaryColor}
+                  size="sm"
+                />
+                <div className="min-w-0">
+                  <h3 className="truncate text-[0.8125rem] font-semibold">
+                    {innings.battingTeam.name}
+                  </h3>
+                  <p className="text-xs text-muted">Innings {innings.number}</p>
+                </div>
+              </div>
+
+              <p className="score-figure shrink-0 text-xl">
+                {innings.runs}-{innings.wickets}
+                <span className="tabular ml-1.5 text-[0.8125rem] font-medium text-muted">
+                  ({innings.overs})
+                </span>
+              </p>
+            </div>
+
+            <div className="overflow-x-auto">
+              <Table density="compact" className="min-w-[32rem]">
+                <thead>
+                  <tr className="border-b border-line-strong">
+                    <Th align="left" className="pl-4 sm:pl-5">
+                      Batter
+                    </Th>
+                    <Th align="right">R</Th>
+                    <Th align="right">B</Th>
+                    <Th align="right">4s</Th>
+                    <Th align="right">6s</Th>
+                    <Th align="right" className="pr-4 sm:pr-5">
+                      SR
+                    </Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {innings.batting.map((batter) => (
+                    <tr key={batter.playerId} className="border-b border-line">
+                      <td className="py-2 pl-4 sm:pl-5">
+                        <p
+                          className={cn(
+                            'text-[0.8125rem] font-medium',
+                            !batter.isOut && 'text-accent',
+                          )}
+                        >
+                          {batter.name}
+                          {!batter.isOut ? <span className="font-normal"> *</span> : null}
+                        </p>
+                        <p className="mt-0.5 text-xs text-muted">
+                          {batter.isOut ? batter.dismissal : 'not out'}
+                        </p>
+                      </td>
+                      <Td align="right" emphasis className="font-bold">
+                        {batter.runs}
+                      </Td>
+                      <Td align="right">{batter.balls}</Td>
+                      <Td align="right">{batter.fours}</Td>
+                      <Td align="right">{batter.sixes}</Td>
+                      <Td align="right" className="pr-4 sm:pr-5">
+                        {batter.balls > 0
+                          ? ((batter.runs / batter.balls) * 100).toFixed(2)
+                          : '0.00'}
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            </div>
+
+            <div className="flex items-center justify-between gap-4 border-b border-line px-4 py-2 text-[0.8125rem] sm:px-5">
+              <span className="font-semibold text-primary">Extras</span>
+              <span className="tabular text-secondary">
+                <span className="font-bold text-primary">{innings.extras.total}</span> (w{' '}
+                {innings.extras.wides}, nb {innings.extras.noBalls}, b {innings.extras.byes}, lb{' '}
+                {innings.extras.legByes})
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-4 border-y border-line px-4 py-2 text-[0.8125rem] sm:px-5">
+              <span className="font-semibold text-primary">Total</span>
+              <span className="tabular text-secondary">
+                <span className="font-bold text-primary">
+                  {innings.runs}-{innings.wickets}
+                </span>{' '}
+                ({innings.overs} Ov, RR {rate})
+              </span>
+            </div>
+
+            <div className="overflow-x-auto border-t border-line">
+              <Table density="compact" className="min-w-[30rem]">
+                <thead>
+                  <tr className="border-b border-line-strong">
+                    <Th align="left" className="pl-4 sm:pl-5">
+                      Bowler
+                    </Th>
+                    <Th align="right">O</Th>
+                    <Th align="right">M</Th>
+                    <Th align="right">R</Th>
+                    <Th align="right">W</Th>
+                    <Th align="right" className="pr-4 sm:pr-5">
+                      ECO
+                    </Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {innings.bowling.map((bowler) => {
+                    const bowled = oversToBalls(bowler.overs);
+                    return (
+                      <tr key={bowler.playerId} className="border-b border-line last:border-b-0">
+                        <td className="py-2 pl-4 text-[0.8125rem] font-medium sm:pl-5">
+                          {bowler.name}
+                        </td>
+                        <Td align="right">{bowler.overs}</Td>
+                        <Td align="right">{bowler.maidens}</Td>
+                        <Td align="right">{bowler.runs}</Td>
+                        <Td align="right" emphasis className="font-bold">
+                          {bowler.wickets}
+                        </Td>
+                        <Td align="right" className="pr-4 sm:pr-5">
+                          {bowled > 0 ? ((bowler.runs * 6) / bowled).toFixed(2) : '0.00'}
+                        </Td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </Table>
+            </div>
+
+            {innings.fallOfWickets.length > 0 ? (
+              <div className="border-t border-line">
+                <p className="eyebrow border-b border-line px-4 py-2 sm:px-5">Fall of wickets</p>
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5 px-4 py-3 text-[0.8125rem] sm:px-5">
+                  {innings.fallOfWickets.map((wicket) => (
+                    <span key={wicket.wicket} className="tabular text-secondary">
+                      <span className="font-bold text-primary">
+                        {wicket.teamRuns}-{wicket.wicket}
+                      </span>{' '}
+                      ({wicket.name}, {wicket.overs})
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function CommentaryView({ snapshot }: { snapshot: MatchSnapshot }) {
+  if (snapshot.recentBalls.length === 0) {
+    return <p className="text-sm text-muted">Nothing bowled yet.</p>;
+  }
+
+  return (
+    <ol className="overflow-hidden rounded-[var(--radius-lg)] border border-line bg-raised">
+      {snapshot.recentBalls
+        .slice()
+        .reverse()
+        .map((ball) => {
+          const big = ball.isWicket || (!ball.extraType && (ball.runs === 4 || ball.runs === 6));
+
+          return (
+            <li
+              key={ball.seq}
+              className={cn(
+                'flex items-start gap-3 border-b border-line px-4 py-2.5 last:border-b-0',
+                ball.isWicket && 'bg-accent-soft',
+              )}
+            >
+              <div className="flex w-10 shrink-0 flex-col items-center gap-1.5">
+                <span className="tabular text-xs font-semibold text-muted">
+                  {ball.overNumber}.{ball.ballNumber}
+                </span>
+                <BallChip display={ball.display} isWicket={ball.isWicket} size="sm" />
+              </div>
+
+              <div className="min-w-0 flex-1 pt-0.5">
+                <p className={cn('text-[0.8125rem] font-semibold', ball.isWicket && 'text-[var(--wicket)]')}>
+                  {eventLabel(ball)}
+                </p>
+                <p
+                  className={cn(
+                    'mt-0.5 text-[0.8125rem] leading-snug',
+                    big ? 'text-primary' : 'text-secondary',
+                  )}
+                >
+                  {commentaryLine(ball)}
+                </p>
+              </div>
+            </li>
+          );
+        })}
+    </ol>
+  );
+}
+
+function eventLabel(ball: BallSummary): string {
+  if (ball.isWicket) return 'Wicket';
+  switch (ball.extraType) {
+    case 'WIDE':
+      return ball.runs > 1 ? `Wide, ${ball.runs}` : 'Wide';
+    case 'NO_BALL':
+      return ball.runs > 1 ? `No ball, ${ball.runs}` : 'No ball';
+    case 'BYE':
+      return `${ball.runs} bye${ball.runs === 1 ? '' : 's'}`;
+    case 'LEG_BYE':
+      return `${ball.runs} leg bye${ball.runs === 1 ? '' : 's'}`;
+    default:
+      break;
+  }
+  if (ball.runs === 0) return 'Dot ball';
+  if (ball.runs === 4) return 'Four';
+  if (ball.runs === 6) return 'Six';
+  return `${ball.runs} run${ball.runs === 1 ? '' : 's'}`;
+}
+
+const commentary = {
+  dot: ['A tidy leave.', 'Good defence.', 'Beaten for pace.', 'Dot ball, pressure builds.'],
+  one: [
+    'Nudged into the gap.',
+    'They keep the scoreboard moving.',
+    'Quick single taken.',
+    'Smart cricket, just one.',
+  ],
+  two: [
+    'Good running between the wickets.',
+    'They come back for two.',
+    'Placed perfectly for a couple.',
+    'Two more added to the total.',
+  ],
+  three: [
+    'They turn one into three.',
+    'Excellent running out there.',
+    'A busy three for the batting side.',
+  ],
+  four: [
+    'Cracking stroke through the gap.',
+    'That races away for four.',
+    'Timed beautifully for a boundary.',
+  ],
+  six: ['That is launched into the stands!', 'Maximum. What a hit.', 'High, handsome, and six.'],
+  wicket: [
+    'The breakthrough arrives.',
+    'Gone. The bowler wins this duel.',
+    'That changes the momentum.',
+  ],
+  extra: [
+    'A gift to the batting side.',
+    'The extras keep ticking over.',
+    'Free runs on the board.',
+  ],
+} as const;
+
+function commentaryLine(ball: BallSummary): string {
+  const key = ball.isWicket
+    ? 'wicket'
+    : ball.extraType
+      ? 'extra'
+      : ball.runs === 6
+        ? 'six'
+        : ball.runs === 4
+          ? 'four'
+          : ball.runs === 3
+            ? 'three'
+            : ball.runs === 2
+              ? 'two'
+              : ball.runs === 1
+                ? 'one'
+                : 'dot';
+  const lines = commentary[key];
+  return lines[ball.seq % lines.length] ?? lines[0];
+}
+
+function ConnectionBadge({ state }: { state: ConnectionState }) {
+  if (state === 'live') return null;
+
+  const labels: Record<Exclude<ConnectionState, 'live'>, string> = {
+    connecting: 'Connecting',
+    reconnecting: 'Reconnecting',
+    offline: 'Offline',
+  };
+
+  return (
+    <span className="eyebrow flex items-center gap-2 text-muted">
+      <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-warning" />
+      {labels[state]}
+    </span>
+  );
+}
+
+function useCondensedHeader(threshold = 260): boolean {
+  const [condensed, setCondensed] = useState(false);
+  const frame = useRef(0);
+
+  useEffect(() => {
+    const update = () => {
+      frame.current = 0;
+      setCondensed(window.scrollY > threshold);
+    };
+
+    const onScroll = () => {
+      if (frame.current === 0) frame.current = window.requestAnimationFrame(update);
+    };
+
+    update();
+    window.addEventListener('scroll', onScroll, { passive: true });
+
+    return () => {
+      if (frame.current !== 0) window.cancelAnimationFrame(frame.current);
+      window.removeEventListener('scroll', onScroll);
+    };
+  }, [threshold]);
+
+  return condensed;
+}
